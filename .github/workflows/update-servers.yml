@@ -1,0 +1,73 @@
+name: Update Anisette Servers
+
+on:
+  schedule:
+    # 每天 UTC 时间 00:00 自动运行（北京时间早上 8 点）
+    - cron: '0 0 * * *'
+  workflow_dispatch:  # 允许手动点击运行
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 必须有写权限才能 push
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Fetch official list and merge StikStore
+        run: |
+          echo "正在获取官方列表..."
+          curl -sS https://servers.sidestore.io/servers.json -o official.json
+
+          echo "合并 StikStore (Windows ADI)..."
+          jq '
+            # 先检查是否已经存在 ani2.stikstore.app
+            (.servers | map(select(.address == "https://ani2.stikstore.app")) | length) as $exists |
+            if $exists > 0 then
+              # 已经存在，直接输出（去掉 cache 字段）
+              del(.cache)
+            else
+              # 不存在，插入到 jkcoxson (Windows ADI) 后面
+              .servers as $servers |
+              ($servers | map(.address == "https://ani.jkcoxson.com") | index(true)) as $idx |
+              if $idx != null then
+                .servers = (
+                  $servers[0:($idx+1)] + 
+                  [{"name": "StikStore (Windows ADI)", "address": "https://ani2.stikstore.app"}] + 
+                  $servers[($idx+1):]
+                )
+              else
+                # 如果找不到 jkcoxson，就直接加到最后
+                .servers = $servers + [{"name": "StikStore (Windows ADI)", "address": "https://ani2.stikstore.app"}]
+              end |
+              del(.cache)
+            end
+          ' official.json > servers.json
+
+          echo "生成结果预览："
+          cat servers.json
+
+      - name: Check if there are changes
+        id: changes
+        run: |
+          if git diff --quiet servers.json; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "没有变化，跳过提交"
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "检测到变化，准备提交"
+          fi
+
+      - name: Commit and push changes
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add servers.json
+          git commit -m "chore: sync official anisette servers + keep StikStore (Windows ADI)"
+          git push
